@@ -23,7 +23,7 @@ CATEGORIES = [
 ]
 
 BANKS = [
-    "Kakaopay",
+    "KakaoBank",
     "Toss Bank",
     "KB Kookmin",
     "Shinhan Bank",
@@ -114,9 +114,11 @@ def show_login(client: Client):
             else:
                 try:
                     sign_in(client, email, password)
-                except Exception as error:
-                    st.error(f"Login failed: {error}")
+                except Exception:
+                    st.error("Login failed. Check your email and password.")
                 else:
+                    # Keep Streamlit's rerun outside the exception handler.
+                    # A rerun is an internal control signal, not a login error.
                     st.rerun()
 
         st.caption("There is no public sign-up. This keeps the app private.")
