@@ -484,7 +484,17 @@ def month_label(month_key):
     return f"{calendar.month_name[month]} {year}"
 
 
-def render_account_manager(client, accounts):
+def year_label(year):
+    """Label current and previous years while keeping older years readable."""
+    current_year = date.today().year
+    if year == current_year:
+        return f"{year} · This year"
+    if year == current_year - 1:
+        return f"{year} · Last year"
+    return str(year)
+
+
+def render_account_manager(client, accounts, show_balances):
     """Show balances and simple forms for account money movements."""
     st.subheader("Account balances")
 
@@ -495,7 +505,10 @@ def render_account_manager(client, accounts):
         )
     else:
         balance_table = accounts[["name", "balance"]].copy()
-        balance_table["balance"] = balance_table["balance"].map(format_krw)
+        if show_balances:
+            balance_table["balance"] = balance_table["balance"].map(format_krw)
+        else:
+            balance_table["balance"] = "₩••••••"
         balance_table = balance_table.rename(
             columns={"name": "Bank / Account", "balance": "Current balance"}
         )
@@ -633,10 +646,12 @@ def render_account_manager(client, accounts):
                 account_balances = accounts.set_index("id")["balance"].to_dict()
 
                 def transfer_account_label(account_id):
-                    return (
-                        f"{account_names[account_id]} · "
-                        f"{format_krw(account_balances[account_id])}"
-                    )
+                    if show_balances:
+                        return (
+                            f"{account_names[account_id]} · "
+                            f"{format_krw(account_balances[account_id])}"
+                        )
+                    return account_names[account_id]
 
                 with st.form("transfer_form", clear_on_submit=True):
                     from_account = st.selectbox(
@@ -862,6 +877,23 @@ except Exception:
     accounts = pd.DataFrame(columns=["id", "name", "balance"])
     balance_features_ready = False
 
+st.title("💸 WonWise")
+st.caption("Your private expense tracker in Korean won · synced with Supabase")
+show_flash()
+
+if balance_features_ready:
+    show_balances = st.toggle(
+        "Show account balances",
+        value=False,
+        help="Turn this off to hide the total and individual account balances.",
+    )
+else:
+    show_balances = False
+    st.warning(
+        "Balance and transfer features are not active yet. Run the updated "
+        "supabase_schema.sql in Supabase SQL Editor, then refresh this app."
+    )
+
 with st.sidebar:
     st.write(f"Signed in as **{current_user['email']}**")
     if st.button("Sign out", width="stretch"):
@@ -885,10 +917,12 @@ with st.sidebar:
             def payment_option_label(option):
                 if option == untracked_option:
                     return "Other payment method (do not change a balance)"
-                return (
-                    f"{account_names[option]} · "
-                    f"{format_krw(account_balances[option])}"
-                )
+                if show_balances:
+                    return (
+                        f"{account_names[option]} · "
+                        f"{format_krw(account_balances[option])}"
+                    )
+                return account_names[option]
 
             selected_payment = st.selectbox(
                 "Pay from",
@@ -959,16 +993,6 @@ with st.sidebar:
                 set_flash(f"Saved {format_krw(amount)} for {category}.")
                 st.rerun()
 
-st.title("💸 WonWise")
-st.caption("Your private expense tracker in Korean won · synced with Supabase")
-show_flash()
-
-if not balance_features_ready:
-    st.warning(
-        "Balance and transfer features are not active yet. Run the updated "
-        "supabase_schema.sql in Supabase SQL Editor, then refresh this app."
-    )
-
 try:
     expenses = load_expenses(supabase)
 except Exception:
@@ -980,34 +1004,44 @@ except Exception:
 
 today = date.today()
 if expenses.empty:
-    spending_this_month = 0
-    spending_this_year = 0
+    spending_year_options = [today.year]
 else:
-    spending_this_month = int(
+    saved_years = expenses["expense_date"].dt.year.unique().tolist()
+    spending_year_options = sorted(set(saved_years + [today.year]), reverse=True)
+
+selected_spending_year = st.selectbox(
+    "Yearly spending",
+    spending_year_options,
+    format_func=year_label,
+)
+
+if expenses.empty:
+    selected_year_spending = 0
+else:
+    selected_year_spending = int(
         expenses.loc[
-            (expenses["expense_date"].dt.year == today.year)
-            & (expenses["expense_date"].dt.month == today.month),
-            "amount",
-        ].sum()
-    )
-    spending_this_year = int(
-        expenses.loc[
-            expenses["expense_date"].dt.year == today.year,
+            expenses["expense_date"].dt.year == selected_spending_year,
             "amount",
         ].sum()
     )
 
 total_balance = int(accounts["balance"].sum()) if not accounts.empty else 0
-overview_1, overview_2, overview_3 = st.columns(3)
-overview_1.metric("Spending this month", format_krw(spending_this_month))
-overview_2.metric("Spending this year", format_krw(spending_this_year))
-overview_3.metric(
+overview_1, overview_2 = st.columns(2)
+overview_1.metric(
+    f"Total spending {selected_spending_year}",
+    format_krw(selected_year_spending),
+)
+overview_2.metric(
     "Total available balance",
-    format_krw(total_balance) if balance_features_ready else "—",
+    (
+        format_krw(total_balance)
+        if balance_features_ready and show_balances
+        else "₩••••••" if balance_features_ready else "—"
+    ),
 )
 
 if balance_features_ready:
-    render_account_manager(supabase, accounts)
+    render_account_manager(supabase, accounts, show_balances)
 
 render_excel_importer(supabase, current_user["id"], expenses)
 

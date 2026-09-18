@@ -7,8 +7,9 @@ Streamlit and Supabase. It can be opened from a phone or computer.
 
 - Private email and password login with Supabase Auth.
 - Add expenses with a date, category, payment account, amount, and note.
-- Show total spending for the current month and current year.
+- Select any available year and show its total spending.
 - Show the current balance of each bank account, wallet, or cash account.
+- Hide or reveal balance values with a privacy toggle.
 - Add incoming money, correct a balance, and transfer money between accounts.
 - Automatically subtract new expenses from the selected tracked account.
 - Automatically restore the balance when a tracked expense is deleted.
@@ -121,6 +122,10 @@ version remains visible, open the app menu and select **Reboot app**.
 
 When adding a new expense, select an account under **Pay from**. The expense
 will automatically reduce that account's balance.
+
+Balance values are hidden by default. Turn on **Show account balances** to
+reveal the total balance, individual account balances, and balances in payment
+account selectors.
 
 ## 7. Import historical expenses from Excel
 
