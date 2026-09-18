@@ -114,8 +114,8 @@ def show_login(client: Client):
             else:
                 try:
                     sign_in(client, email, password)
-                except Exception:
-                    st.error("Login failed. Check your email and password.")
+                except Exception as error:
+                    st.error(f"Login failed: {error}")
                 else:
                     st.rerun()
 
