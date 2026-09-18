@@ -516,13 +516,6 @@ def format_krw(amount):
     return f"₩{int(amount):,}"
 
 
-def format_signed_krw(amount):
-    """Display incoming and outgoing amounts with an explicit sign."""
-    amount = int(amount)
-    sign = "+" if amount > 0 else "−"
-    return f"{sign}₩{abs(amount):,}"
-
-
 def month_label(month_key):
     """Convert YYYY-MM into a friendly label."""
     year, month = map(int, month_key.split("-"))
@@ -539,70 +532,60 @@ def year_label(year):
     return str(year)
 
 
-def render_movement_history(movements, accounts, show_balances):
-    """Show where money came from and where it moved."""
-    with st.expander("Money history · latest 200 movements"):
-        if movements.empty:
-            st.info("No money movements yet.")
-            return
+def render_added_money_history(movements, accounts, show_balances):
+    """Show only entries created through the Add money form."""
+    st.markdown("#### Added money history")
+    deposits = movements[movements["movement_type"] == "deposit"].copy()
+    if deposits.empty:
+        st.caption("No money has been added yet.")
+        return
 
-        movement_labels = {
-            "initial": "Opening balance",
-            "deposit": "Money in",
-            "adjustment": "Balance correction",
-            "transfer_out": "Transfer out",
-            "transfer_in": "Transfer in",
-            "expense": "Expense",
-            "expense_refund": "Deleted expense refund",
-        }
-        account_names = accounts.set_index("id")["name"].to_dict()
-        history = movements.copy()
-        history["Date"] = (
-            history["created_at"]
-            .dt.tz_convert("Asia/Seoul")
-            .dt.strftime("%Y-%m-%d %H:%M")
-        )
-        history["Type"] = history["movement_type"].map(movement_labels).fillna(
-            history["movement_type"]
-        )
-        history["Account"] = history["account_id"].map(account_names).fillna(
-            "Deleted account"
-        )
-        if show_balances:
-            history["Amount"] = history["amount"].map(format_signed_krw)
-        else:
-            history["Amount"] = "₩••••••"
-        history["Source / Note"] = history["note"].replace("", "—")
-        st.dataframe(
-            history[["Date", "Type", "Account", "Amount", "Source / Note"]],
-            hide_index=True,
-            width="stretch",
-        )
+    account_names = accounts.set_index("id")["name"].to_dict()
+    deposits["Date"] = (
+        deposits["created_at"]
+        .dt.tz_convert("Asia/Seoul")
+        .dt.strftime("%Y-%m-%d %H:%M")
+    )
+    deposits["Account"] = deposits["account_id"].map(account_names).fillna(
+        "Deleted account"
+    )
+    if show_balances:
+        deposits["Amount"] = deposits["amount"].map(format_krw)
+    else:
+        deposits["Amount"] = "₩••••••"
+    deposits["Source / Note"] = deposits["note"].replace("", "—")
+    st.dataframe(
+        deposits[["Date", "Account", "Amount", "Source / Note"]],
+        hide_index=True,
+        width="stretch",
+    )
 
 
 def render_account_manager(client, accounts, movements, show_balances):
     """Show balances and simple forms for account money movements."""
-    st.subheader("Account balances")
+    balance_tab, manage_tab = st.tabs(["Balance overview", "Manage balances"])
 
-    if accounts.empty:
-        st.info(
-            "No balance account yet. Create Jeonbuk Bank, Kakao Pay, cash, or "
-            "another account below and enter its current balance."
-        )
-    else:
-        balance_table = accounts[["name", "balance"]].copy()
-        if show_balances:
-            balance_table["balance"] = balance_table["balance"].map(format_krw)
+    with balance_tab:
+        st.subheader("Account balances")
+
+        if accounts.empty:
+            st.info(
+                "No balance account yet. Open Manage balances to create "
+                "Jeonbuk Bank, Kakao Pay, cash, or another account."
+            )
         else:
-            balance_table["balance"] = "₩••••••"
-        balance_table = balance_table.rename(
-            columns={"name": "Bank / Account", "balance": "Current balance"}
-        )
-        st.dataframe(balance_table, hide_index=True, width="stretch")
+            balance_table = accounts[["name", "balance"]].copy()
+            if show_balances:
+                balance_table["balance"] = balance_table["balance"].map(format_krw)
+            else:
+                balance_table["balance"] = "₩••••••"
+            balance_table = balance_table.rename(
+                columns={"name": "Bank / Account", "balance": "Current balance"}
+            )
+            st.dataframe(balance_table, hide_index=True, width="stretch")
 
-    render_movement_history(movements, accounts, show_balances)
-
-    with st.expander("Manage balances and transfer money", expanded=accounts.empty):
+    with manage_tab:
+        st.subheader("Manage balances")
         create_tab, add_tab, correct_tab, transfer_tab = st.tabs(
             ["Add account", "Add money", "Correct balance", "Transfer"]
         )
@@ -689,6 +672,12 @@ def render_account_manager(client, accounts, movements, show_balances):
                             f"{account_names[deposit_account]}."
                         )
                         st.rerun()
+
+                render_added_money_history(
+                    movements,
+                    accounts,
+                    show_balances,
+                )
 
         with correct_tab:
             if accounts.empty:

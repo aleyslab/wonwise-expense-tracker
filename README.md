@@ -14,7 +14,7 @@ Streamlit and Supabase. It can be opened from a phone or computer.
 - Add incoming money, correct a balance, and transfer money between accounts.
 - Classify incoming money as scholarship, salary, family transfer, refund, and
   other common sources.
-- Review the latest account movements in a Money history table.
+- Review a dedicated Added money history directly below the Add money form.
 - Refresh all displayed data without signing out or closing the app.
 - Automatically subtract new expenses from the selected tracked account.
 - Automatically restore the balance when a tracked expense is deleted.
@@ -114,12 +114,12 @@ After a GitHub update, Streamlit normally redeploys automatically. If the old
 version remains visible, open the app menu and select **Reboot app**.
 
 Inside WonWise, use **Refresh data** whenever you want to reload expenses,
-balances, yearly totals, and money history without signing out.
+balances, yearly totals, and added-money entries without signing out.
 
 ## 6. Set up account balances
 
 1. Sign in to WonWise.
-2. Open **Manage balances and transfer money**.
+2. Open the **Manage balances** tab.
 3. Use **Add account** to create accounts such as `Jeonbuk Bank` and
    `Kakao Pay`.
 4. Enter the amount currently available in each real account.
@@ -138,10 +138,10 @@ account selectors.
 The selected year's total spending is also hidden by default. Turn on
 **Show yearly spending** to reveal it without showing any account balances.
 
-When adding money, choose its source and optionally enter more details. Open
-**Money history** to review incoming money, expenses, corrections, refunds, and
-transfers. Money moved between your own accounts should be entered through the
-**Transfer** tab, not **Add money**, so the total balance stays correct.
+When adding money, choose its source and optionally enter more details. The new
+entry appears immediately in **Added money history** below the Add money form.
+Money moved between your own accounts should be entered through the **Transfer**
+tab, not **Add money**, so the total balance stays correct.
 
 ## 7. Import historical expenses from Excel
 
