@@ -113,11 +113,11 @@ def show_login(client: Client):
                 st.warning("Please enter both email and password.")
             else:
                 try:
-                sign_in(client, email, password)
-            except Exception:
-                st.error("Login failed. Check your email and password.")
-            else:
-                st.rerun()
+                    sign_in(client, email, password)
+                except Exception:
+                    st.error("Login failed. Check your email and password.")
+                else:
+                    st.rerun()
 
         st.caption("There is no public sign-up. This keeps the app private.")
 
