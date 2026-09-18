@@ -10,7 +10,12 @@ Streamlit and Supabase. It can be opened from a phone or computer.
 - Select any available year and show its total spending.
 - Show the current balance of each bank account, wallet, or cash account.
 - Hide or reveal balance values with a privacy toggle.
+- Hide or reveal yearly spending independently with its own privacy toggle.
 - Add incoming money, correct a balance, and transfer money between accounts.
+- Classify incoming money as scholarship, salary, family transfer, refund, and
+  other common sources.
+- Review the latest account movements in a Money history table.
+- Refresh all displayed data without signing out or closing the app.
 - Automatically subtract new expenses from the selected tracked account.
 - Automatically restore the balance when a tracked expense is deleted.
 - Monthly bar chart and pie chart for spending by category.
@@ -108,6 +113,9 @@ SUPABASE_KEY = "your-publishable-or-anon-key"
 After a GitHub update, Streamlit normally redeploys automatically. If the old
 version remains visible, open the app menu and select **Reboot app**.
 
+Inside WonWise, use **Refresh data** whenever you want to reload expenses,
+balances, yearly totals, and money history without signing out.
+
 ## 6. Set up account balances
 
 1. Sign in to WonWise.
@@ -126,6 +134,14 @@ will automatically reduce that account's balance.
 Balance values are hidden by default. Turn on **Show account balances** to
 reveal the total balance, individual account balances, and balances in payment
 account selectors.
+
+The selected year's total spending is also hidden by default. Turn on
+**Show yearly spending** to reveal it without showing any account balances.
+
+When adding money, choose its source and optionally enter more details. Open
+**Money history** to review incoming money, expenses, corrections, refunds, and
+transfers. Money moved between your own accounts should be entered through the
+**Transfer** tab, not **Add money**, so the total balance stays correct.
 
 ## 7. Import historical expenses from Excel
 
@@ -157,3 +173,10 @@ An internet connection is required to use the application.
 - Never use the Supabase secret key or `service_role` key in Streamlit.
 - Use a strong password.
 - Create new users from Supabase Authentication when access is required.
+
+## Troubleshooting expense deletion
+
+If deleting an expense shows `permission denied for table account_movements`,
+run `fix_delete_permission.sql` once in the Supabase SQL Editor. The delete
+function verifies that the expense belongs to the signed-in user before it
+deletes the expense or restores a tracked balance.

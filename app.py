@@ -38,6 +38,16 @@ BANKS = [
     "Other",
 ]
 
+INCOME_SOURCES = [
+    "Scholarship / stipend",
+    "Salary / assistantship",
+    "Family transfer / allowance",
+    "Refund",
+    "Cash deposit",
+    "Gift",
+    "Other",
+]
+
 IMPORT_CATEGORY_DEFAULTS = {
     "Food & Groceries": "Food",
     "Lifestyle & Others": "Other",
@@ -240,6 +250,34 @@ def load_accounts(client):
     if not accounts.empty:
         accounts["balance"] = pd.to_numeric(accounts["balance"]).astype("int64")
     return accounts
+
+
+def load_account_movements(client):
+    """Load the latest balance movements for the signed-in user."""
+    response = (
+        client.table("account_movements")
+        .select("id, account_id, movement_type, amount, note, created_at")
+        .order("created_at", desc=True)
+        .limit(200)
+        .execute()
+    )
+    columns = [
+        "id",
+        "account_id",
+        "movement_type",
+        "amount",
+        "note",
+        "created_at",
+    ]
+    movements = pd.DataFrame(response.data or [], columns=columns)
+    if not movements.empty:
+        movements["amount"] = pd.to_numeric(movements["amount"]).astype("int64")
+        movements["created_at"] = pd.to_datetime(
+            movements["created_at"],
+            utc=True,
+            errors="coerce",
+        )
+    return movements
 
 
 def create_account(client, name, opening_balance):
@@ -478,6 +516,13 @@ def format_krw(amount):
     return f"₩{int(amount):,}"
 
 
+def format_signed_krw(amount):
+    """Display incoming and outgoing amounts with an explicit sign."""
+    amount = int(amount)
+    sign = "+" if amount > 0 else "−"
+    return f"{sign}₩{abs(amount):,}"
+
+
 def month_label(month_key):
     """Convert YYYY-MM into a friendly label."""
     year, month = map(int, month_key.split("-"))
@@ -494,7 +539,48 @@ def year_label(year):
     return str(year)
 
 
-def render_account_manager(client, accounts, show_balances):
+def render_movement_history(movements, accounts, show_balances):
+    """Show where money came from and where it moved."""
+    with st.expander("Money history · latest 200 movements"):
+        if movements.empty:
+            st.info("No money movements yet.")
+            return
+
+        movement_labels = {
+            "initial": "Opening balance",
+            "deposit": "Money in",
+            "adjustment": "Balance correction",
+            "transfer_out": "Transfer out",
+            "transfer_in": "Transfer in",
+            "expense": "Expense",
+            "expense_refund": "Deleted expense refund",
+        }
+        account_names = accounts.set_index("id")["name"].to_dict()
+        history = movements.copy()
+        history["Date"] = (
+            history["created_at"]
+            .dt.tz_convert("Asia/Seoul")
+            .dt.strftime("%Y-%m-%d %H:%M")
+        )
+        history["Type"] = history["movement_type"].map(movement_labels).fillna(
+            history["movement_type"]
+        )
+        history["Account"] = history["account_id"].map(account_names).fillna(
+            "Deleted account"
+        )
+        if show_balances:
+            history["Amount"] = history["amount"].map(format_signed_krw)
+        else:
+            history["Amount"] = "₩••••••"
+        history["Source / Note"] = history["note"].replace("", "—")
+        st.dataframe(
+            history[["Date", "Type", "Account", "Amount", "Source / Note"]],
+            hide_index=True,
+            width="stretch",
+        )
+
+
+def render_account_manager(client, accounts, movements, show_balances):
     """Show balances and simple forms for account money movements."""
     st.subheader("Account balances")
 
@@ -513,6 +599,8 @@ def render_account_manager(client, accounts, show_balances):
             columns={"name": "Bank / Account", "balance": "Current balance"}
         )
         st.dataframe(balance_table, hide_index=True, width="stretch")
+
+    render_movement_history(movements, accounts, show_balances)
 
     with st.expander("Manage balances and transfer money", expanded=accounts.empty):
         create_tab, add_tab, correct_tab, transfer_tab = st.tabs(
@@ -568,15 +656,24 @@ def render_account_manager(client, accounts, show_balances):
                         value=10_000,
                         step=1_000,
                     )
-                    deposit_note = st.text_input(
-                        "Source / note (optional)",
-                        placeholder="Example: salary or cash top-up",
+                    deposit_source = st.selectbox(
+                        "Money source",
+                        INCOME_SOURCES,
+                    )
+                    deposit_details = st.text_input(
+                        "Details (optional)",
+                        placeholder="Example: September GKS stipend",
                     )
                     deposit_clicked = st.form_submit_button(
                         "Add money", width="stretch"
                     )
 
                 if deposit_clicked:
+                    deposit_note = deposit_source
+                    if deposit_details.strip():
+                        deposit_note = (
+                            f"{deposit_source} · {deposit_details.strip()}"
+                        )
                     try:
                         add_money(
                             client,
@@ -872,23 +969,54 @@ current_user = st.session_state.current_user
 
 try:
     accounts = load_accounts(supabase)
+    account_movements = load_account_movements(supabase)
     balance_features_ready = True
 except Exception:
     accounts = pd.DataFrame(columns=["id", "name", "balance"])
+    account_movements = pd.DataFrame(
+        columns=[
+            "id",
+            "account_id",
+            "movement_type",
+            "amount",
+            "note",
+            "created_at",
+        ]
+    )
     balance_features_ready = False
 
 st.title("💸 WonWise")
 st.caption("Your private expense tracker in Korean won · synced with Supabase")
 show_flash()
 
-if balance_features_ready:
-    show_balances = st.toggle(
-        "Show account balances",
+spending_visibility_column, balance_visibility_column, refresh_column = st.columns(
+    [2, 2, 1]
+)
+with spending_visibility_column:
+    show_yearly_spending = st.toggle(
+        "Show yearly spending",
         value=False,
-        help="Turn this off to hide the total and individual account balances.",
+        help="Turn this on to reveal the selected year's total spending.",
     )
-else:
-    show_balances = False
+
+with balance_visibility_column:
+    if balance_features_ready:
+        show_balances = st.toggle(
+            "Show account balances",
+            value=False,
+            help="Turn this off to hide the total and individual account balances.",
+        )
+    else:
+        show_balances = False
+
+with refresh_column:
+    refresh_clicked = st.button("↻ Refresh data", width="stretch")
+
+if refresh_clicked:
+    set_flash("Data refreshed.")
+    st.rerun()
+
+if not balance_features_ready:
     st.warning(
         "Balance and transfer features are not active yet. Run the updated "
         "supabase_schema.sql in Supabase SQL Editor, then refresh this app."
@@ -1029,7 +1157,7 @@ total_balance = int(accounts["balance"].sum()) if not accounts.empty else 0
 overview_1, overview_2 = st.columns(2)
 overview_1.metric(
     f"Total spending {selected_spending_year}",
-    format_krw(selected_year_spending),
+    format_krw(selected_year_spending) if show_yearly_spending else "₩••••••",
 )
 overview_2.metric(
     "Total available balance",
@@ -1041,7 +1169,12 @@ overview_2.metric(
 )
 
 if balance_features_ready:
-    render_account_manager(supabase, accounts, show_balances)
+    render_account_manager(
+        supabase,
+        accounts,
+        account_movements,
+        show_balances,
+    )
 
 render_excel_importer(supabase, current_user["id"], expenses)
 
