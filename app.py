@@ -23,7 +23,7 @@ CATEGORIES = [
 ]
 
 BANKS = [
-    "KakaoBank",
+    "Kakaopay",
     "Toss Bank",
     "KB Kookmin",
     "Shinhan Bank",
