@@ -23,7 +23,7 @@ CATEGORIES = [
 ]
 
 BANKS = [
-    "KakaoBank",
+    "Kakao Pay",
     "Toss Bank",
     "KB Kookmin",
     "Shinhan Bank",
@@ -32,9 +32,34 @@ BANKS = [
     "NH NongHyup",
     "IBK Industrial Bank",
     "Jeonbuk Bank",
+    "Bank Jago",
+    "blu by BCA Digital",
     "Cash",
     "Other",
 ]
+
+IMPORT_CATEGORY_DEFAULTS = {
+    "Food & Groceries": "Food",
+    "Lifestyle & Others": "Other",
+    "Housing & Utilities": "Housing",
+    "Health & Personal": "Health",
+    "Transportation": "Transportation",
+}
+
+IMPORT_BANK_DEFAULTS = {
+    "Card JB Bank": "Jeonbuk Bank",
+    "Card Jago": "Bank Jago",
+    "Card Blu": "blu by BCA Digital",
+    "Cash": "Cash",
+}
+
+IMPORT_REQUIRED_COLUMNS = {
+    "expense details",
+    "category",
+    "cost",
+    "transaction date",
+    "paid by",
+}
 
 
 def load_supabase_settings():
@@ -140,6 +165,25 @@ def add_expense(client, user_id, expense_date, category, bank, amount, note):
     ).execute()
 
 
+def import_expenses(client, user_id, expenses):
+    """Insert imported expenses in small batches."""
+    rows = []
+    for expense in expenses:
+        rows.append(
+            {
+                "user_id": user_id,
+                "expense_date": expense["expense_date"],
+                "category": expense["category"],
+                "bank": expense["bank"],
+                "amount": int(expense["amount"]),
+                "note": expense["note"],
+            }
+        )
+
+    for start in range(0, len(rows), 200):
+        client.table("expenses").insert(rows[start : start + 200]).execute()
+
+
 def delete_expense(client, expense_id):
     """Delete one expense. RLS prevents deleting another user's row."""
     client.table("expenses").delete().eq("id", expense_id).execute()
@@ -163,6 +207,171 @@ def load_expenses(client):
     return expenses
 
 
+def normalize_column_name(column):
+    """Normalize spreadsheet headers so capitalization does not matter."""
+    return " ".join(str(column).strip().lower().split())
+
+
+def parse_import_date(value):
+    """Read Excel date cells, Excel serial dates, or written dates."""
+    if pd.isna(value):
+        return pd.NaT
+    if isinstance(value, (int, float)):
+        return pd.Timestamp("1899-12-30") + pd.to_timedelta(value, unit="D")
+    return pd.to_datetime(value, errors="coerce")
+
+
+def parse_import_amount(value):
+    """Turn values such as ₩14,060 into the integer 14060."""
+    if pd.isna(value):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+
+    written_value = str(value).strip()
+    is_negative = written_value.startswith("-") or (
+        written_value.startswith("(") and written_value.endswith(")")
+    )
+    cleaned = "".join(character for character in written_value if character.isdigit())
+    if not cleaned:
+        return None
+    amount = int(cleaned)
+    return -amount if is_negative else amount
+
+
+def read_expense_workbook(uploaded_file):
+    """Combine all monthly sheets that use the user's expense format."""
+    uploaded_file.seek(0)
+    workbook_sheets = pd.read_excel(uploaded_file, sheet_name=None)
+    imported_frames = []
+    invalid_frames = []
+    used_sheets = []
+    ignored_sheets = []
+
+    for sheet_name, source in workbook_sheets.items():
+        normalized_columns = {
+            normalize_column_name(column): column for column in source.columns
+        }
+        if not IMPORT_REQUIRED_COLUMNS.issubset(normalized_columns):
+            ignored_sheets.append(sheet_name)
+            continue
+
+        used_sheets.append(sheet_name)
+        frame = pd.DataFrame(
+            {
+                "details": source[normalized_columns["expense details"]],
+                "source_category": source[normalized_columns["category"]],
+                "amount": source[normalized_columns["cost"]],
+                "expense_date": source[normalized_columns["transaction date"]],
+                "source_bank": source[normalized_columns["paid by"]],
+                "extra_note": (
+                    source[normalized_columns["notes"]]
+                    if "notes" in normalized_columns
+                    else ""
+                ),
+            }
+        )
+
+        frame = frame[frame["details"].notna()].copy()
+        frame["details"] = frame["details"].astype(str).str.strip()
+        frame = frame[frame["details"] != ""]
+        frame["source_category"] = frame["source_category"].fillna("").astype(str).str.strip()
+        frame["source_bank"] = frame["source_bank"].fillna("").astype(str).str.strip()
+        frame["extra_note"] = frame["extra_note"].fillna("").astype(str).str.strip()
+        frame["amount"] = frame["amount"].map(parse_import_amount)
+        frame["expense_date"] = frame["expense_date"].map(parse_import_date)
+        frame["source_sheet"] = sheet_name
+
+        invalid = frame[
+            frame["expense_date"].isna()
+            | frame["amount"].isna()
+            | (frame["amount"] <= 0)
+            | (frame["source_category"] == "")
+            | (frame["source_bank"] == "")
+        ].copy()
+        valid = frame.drop(index=invalid.index).copy()
+
+        if not valid.empty:
+            imported_frames.append(valid)
+        if not invalid.empty:
+            invalid_frames.append(invalid)
+
+    columns = [
+        "details",
+        "source_category",
+        "amount",
+        "expense_date",
+        "source_bank",
+        "extra_note",
+        "source_sheet",
+    ]
+    imported = (
+        pd.concat(imported_frames, ignore_index=True)
+        if imported_frames
+        else pd.DataFrame(columns=columns)
+    )
+    invalid = (
+        pd.concat(invalid_frames, ignore_index=True)
+        if invalid_frames
+        else pd.DataFrame(columns=columns)
+    )
+    return imported, invalid, used_sheets, ignored_sheets
+
+
+def expense_import_key(expense_date, category, bank, amount, note):
+    """Create a stable key used only to avoid duplicate imports."""
+    normalized_date = pd.Timestamp(expense_date).date().isoformat()
+    normalized_note = "" if pd.isna(note) else str(note).strip().lower()
+    return (
+        normalized_date,
+        str(category).strip().lower(),
+        str(bank).strip().lower(),
+        int(amount),
+        normalized_note,
+    )
+
+
+def prepare_import_rows(imported, category_mapping, bank_mapping, existing_expenses):
+    """Apply mappings and remove rows already saved in Supabase."""
+    existing_keys = set()
+    for _, expense in existing_expenses.iterrows():
+        existing_keys.add(
+            expense_import_key(
+                expense["expense_date"],
+                expense["category"],
+                expense["bank"],
+                expense["amount"],
+                expense["note"],
+            )
+        )
+
+    prepared_rows = []
+    duplicate_count = 0
+    seen_upload_keys = set()
+
+    for _, expense in imported.iterrows():
+        note = expense["details"]
+        if expense["extra_note"]:
+            note = f"{note} | {expense['extra_note']}"
+
+        prepared = {
+            "expense_date": expense["expense_date"].date().isoformat(),
+            "category": category_mapping[expense["source_category"]],
+            "bank": bank_mapping[expense["source_bank"]],
+            "amount": int(expense["amount"]),
+            "note": note,
+        }
+        key = expense_import_key(**prepared)
+        if key in existing_keys or key in seen_upload_keys:
+            duplicate_count += 1
+            continue
+
+        seen_upload_keys.add(key)
+        prepared_rows.append(prepared)
+
+    return prepared_rows, duplicate_count
+
+
 def format_krw(amount):
     """Display an integer amount as Korean won."""
     return f"₩{int(amount):,}"
@@ -172,6 +381,119 @@ def month_label(month_key):
     """Convert YYYY-MM into a friendly label."""
     year, month = map(int, month_key.split("-"))
     return f"{calendar.month_name[month]} {year}"
+
+
+def render_excel_importer(client, user_id, existing_expenses):
+    """Show an importer tailored to the user's multi-sheet expense workbook."""
+    with st.expander("Import expenses from Excel"):
+        st.write(
+            "Upload your existing .xlsx file. Monthly sheets are combined, while "
+            "summary sheets and total rows are ignored automatically."
+        )
+        uploaded_file = st.file_uploader(
+            "Expense spreadsheet",
+            type=["xlsx"],
+            key="expense_workbook",
+        )
+        if uploaded_file is None:
+            return
+
+        try:
+            imported, invalid, used_sheets, ignored_sheets = read_expense_workbook(
+                uploaded_file
+            )
+        except Exception as error:
+            st.error(f"Could not read this Excel file: {error}")
+            return
+
+        if imported.empty:
+            st.warning("No valid expense rows were found in this workbook.")
+            return
+
+        st.success(
+            f"Found {len(imported):,} valid expenses across "
+            f"{len(used_sheets)} monthly sheets."
+        )
+        if ignored_sheets:
+            st.caption(
+                "Ignored summary sheets: " + ", ".join(ignored_sheets)
+            )
+        if not invalid.empty:
+            row_word = "row" if len(invalid) == 1 else "rows"
+            st.warning(
+                f"{len(invalid)} {row_word} will be skipped because its date, amount, "
+                "category, or payment account is invalid."
+            )
+
+        st.markdown("#### Match spreadsheet categories")
+        category_mapping = {}
+        category_columns = st.columns(2)
+        for index, source_category in enumerate(
+            sorted(imported["source_category"].unique())
+        ):
+            default_category = IMPORT_CATEGORY_DEFAULTS.get(source_category, "Other")
+            with category_columns[index % 2]:
+                category_mapping[source_category] = st.selectbox(
+                    source_category,
+                    CATEGORIES,
+                    index=CATEGORIES.index(default_category),
+                    key=f"import_category_{source_category}",
+                )
+
+        st.markdown("#### Match payment accounts")
+        bank_mapping = {}
+        bank_columns = st.columns(2)
+        for index, source_bank in enumerate(sorted(imported["source_bank"].unique())):
+            default_bank = IMPORT_BANK_DEFAULTS.get(source_bank, "Other")
+            with bank_columns[index % 2]:
+                bank_mapping[source_bank] = st.selectbox(
+                    source_bank,
+                    BANKS,
+                    index=BANKS.index(default_bank),
+                    key=f"import_bank_{source_bank}",
+                )
+
+        rows_to_import, duplicate_count = prepare_import_rows(
+            imported,
+            category_mapping,
+            bank_mapping,
+            existing_expenses,
+        )
+
+        preview = pd.DataFrame(rows_to_import)
+        total_amount = sum(row["amount"] for row in rows_to_import)
+        metric_1, metric_2, metric_3 = st.columns(3)
+        metric_1.metric("Ready to import", f"{len(rows_to_import):,}")
+        metric_2.metric("Total", format_krw(total_amount))
+        metric_3.metric("Duplicates skipped", f"{duplicate_count:,}")
+
+        if not preview.empty:
+            preview["amount"] = preview["amount"].map(format_krw)
+            preview = preview.rename(
+                columns={
+                    "expense_date": "Date",
+                    "category": "Category",
+                    "bank": "Bank / Account",
+                    "amount": "Amount",
+                    "note": "Used for / Note",
+                }
+            )
+            st.dataframe(preview.head(30), hide_index=True, width="stretch")
+            st.caption("Preview shows the first 30 rows.")
+
+        import_clicked = st.button(
+            f"Import {len(rows_to_import):,} expenses",
+            type="primary",
+            disabled=not rows_to_import,
+        )
+        if import_clicked:
+            try:
+                import_expenses(client, user_id, rows_to_import)
+            except Exception as error:
+                st.error(f"Import failed: {error}")
+            else:
+                st.success(f"Imported {len(rows_to_import):,} expenses.")
+                st.rerun()
 
 
 def draw_category_charts(category_summary):
@@ -253,7 +575,10 @@ with st.sidebar:
             step=1_000,
             help="Enter a whole number, for example 12500.",
         )
-        note = st.text_input("Note (optional)", placeholder="Example: lunch")
+        note = st.text_input(
+            "Used for / note (optional)",
+            placeholder="Example: lunch at the cafeteria",
+        )
         submitted = st.form_submit_button("Save expense", width="stretch")
 
     if submitted:
@@ -286,6 +611,8 @@ except Exception:
         "Security policies, and Streamlit secrets."
     )
     st.stop()
+
+render_excel_importer(supabase, current_user["id"], expenses)
 
 current_month = date.today().strftime("%Y-%m")
 if expenses.empty:
@@ -348,7 +675,7 @@ else:
             "category": "Category",
             "bank": "Bank / Account",
             "amount": "Amount",
-            "note": "Note",
+            "note": "Used for / Note",
         }
     )
     st.dataframe(display_table, hide_index=True, width="stretch")
