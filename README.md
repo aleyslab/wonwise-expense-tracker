@@ -1,66 +1,74 @@
-# WonWise Expense Tracker — Online Version
+# WonWise Expense Tracker
 
-WonWise adalah aplikasi Streamlit untuk mencatat pengeluaran dalam Korean won (KRW). Versi ini menggunakan:
+WonWise is a simple private expense tracker for Korean won (KRW), built with
+Streamlit and Supabase. It can be opened from a phone or computer.
 
-- **Supabase Auth** untuk login email dan password.
-- **Supabase Database** agar data tetap tersimpan secara online.
-- **Row Level Security (RLS)** agar setiap akun hanya dapat mengakses datanya sendiri.
-- **Streamlit Community Cloud** agar aplikasi bisa dibuka dari HP kapan saja.
+## Features
 
-## Fitur
+- Private email and password login with Supabase Auth.
+- Add expenses with a date, category, payment account, amount, and note.
+- Show total spending for the current month and current year.
+- Show the current balance of each bank account, wallet, or cash account.
+- Add incoming money, correct a balance, and transfer money between accounts.
+- Automatically subtract new expenses from the selected tracked account.
+- Automatically restore the balance when a tracked expense is deleted.
+- Monthly bar chart and pie chart for spending by category.
+- Monthly spending summary by bank or payment account.
+- Import multiple monthly sheets from an Excel workbook.
+- Preview imported rows, map categories and accounts, and skip duplicates.
+- Row Level Security so each user can only access their own data.
 
-- Tambah pengeluaran berdasarkan tanggal, kategori, bank/payment account, jumlah, dan catatan.
-- Ringkasan bulanan dalam KRW.
-- Bar chart dan pie chart berdasarkan kategori.
-- Ringkasan pengeluaran berdasarkan bank/account.
-- Login, logout, dan hapus transaksi.
-- Tampilan responsif untuk browser HP.
-
-## File penting
+## Project files
 
 ```text
-expense_tracker/
+wonwise-expense-tracker/
 ├── app.py
 ├── requirements.txt
 ├── supabase_schema.sql
+├── .gitignore
 ├── .streamlit/
 │   └── secrets.toml.example
 └── README.md
 ```
 
-## 1. Buat project Supabase
+## 1. Set up Supabase
 
-1. Buka https://supabase.com/dashboard dan buat project baru.
-2. Setelah project siap, buka **SQL Editor**.
-3. Salin seluruh isi `supabase_schema.sql`, tempel ke SQL Editor, lalu tekan **Run**.
-4. Buka **Authentication → Users → Add user → Create new user**.
-5. Masukkan email dan password yang akan kamu gunakan untuk login.
+1. Open the [Supabase Dashboard](https://supabase.com/dashboard) and create a
+   project.
+2. Open **SQL Editor** and create a new query.
+3. Copy the complete contents of `supabase_schema.sql` into the query.
+4. Click **Run**.
+5. Open **Authentication → Users → Add user → Create new user**.
+6. Enter the email and password that will be used to sign in to WonWise.
 
-Tidak ada tombol daftar pada aplikasi. Akun dibuat dari dashboard Supabase supaya aplikasi tetap private.
+If an older version of WonWise is already installed, run the complete updated
+SQL file again. It adds the balance and transfer features without deleting
+existing expense data.
 
-## 2. Ambil Supabase URL dan key
+## 2. Get the Supabase URL and key
 
-Di dashboard Supabase, buka **Project Settings → API** atau **Connect**.
+Open **Project Settings → API**, or use the **Connect** button in Supabase.
+Copy:
 
-Ambil:
+- The project URL.
+- The publishable key or legacy `anon` key.
 
-- Project URL.
-- Publishable key atau legacy `anon` key.
+Do not use the secret key or `service_role` key in this application.
 
-Jangan menggunakan `service_role` atau secret key di aplikasi.
+## 3. Configure secrets locally
 
-## 3. Jalankan di komputer
-
-Buat file `.streamlit/secrets.toml` dengan menyalin `secrets.toml.example`, kemudian ganti nilainya:
+Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml`, then enter
+the real values:
 
 ```toml
 SUPABASE_URL = "https://your-project.supabase.co"
 SUPABASE_KEY = "your-publishable-or-anon-key"
 ```
 
-File asli `secrets.toml` sudah masuk `.gitignore`, jadi jangan di-upload ke GitHub.
+The real `secrets.toml` file is excluded by `.gitignore` and must not be
+uploaded to GitHub.
 
-Install dan jalankan:
+Install and start the application:
 
 ```powershell
 python -m venv .venv
@@ -69,42 +77,78 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-## 4. Upload ke GitHub
+## 4. Upload the project to GitHub
 
-1. Buat repository baru di GitHub, misalnya `wonwise-expense-tracker`.
-2. Upload `app.py`, `requirements.txt`, `supabase_schema.sql`, folder `.streamlit` yang hanya berisi `secrets.toml.example`, dan `README.md`.
-3. Pastikan file `.streamlit/secrets.toml` yang berisi key asli tidak ikut ter-upload.
+1. Open the GitHub repository.
+2. Click **Add file → Upload files**.
+3. Upload the extracted project files, especially `app.py`,
+   `supabase_schema.sql`, `requirements.txt`, and `README.md`.
+4. Do not upload only the ZIP file.
+5. Click **Commit changes**.
 
-## 5. Deploy ke Streamlit Community Cloud
+Open `app.py` on GitHub and search for `Spending this month`. If the text is
+present, the updated application file has been uploaded successfully.
 
-1. Buka https://share.streamlit.io dan login menggunakan GitHub.
-2. Klik **Create app**.
-3. Pilih repository dan branch GitHub tadi.
-4. Isi main file path dengan `app.py`.
-5. Buka **Advanced settings → Secrets**.
-6. Masukkan:
+## 5. Deploy with Streamlit Community Cloud
+
+1. Open [Streamlit Community Cloud](https://share.streamlit.io) and sign in
+   with GitHub.
+2. Create an app from the WonWise repository and the `main` branch.
+3. Set the main file path to `app.py`.
+4. Open **Advanced settings → Secrets** and add:
 
 ```toml
 SUPABASE_URL = "https://your-project.supabase.co"
 SUPABASE_KEY = "your-publishable-or-anon-key"
 ```
 
-7. Klik **Deploy**.
+5. Deploy the app.
 
-Setelah selesai, Streamlit memberikan URL publik. Orang lain bisa melihat halaman login, tetapi mereka tidak bisa membaca data tanpa akun yang valid. RLS di Supabase tetap melindungi setiap baris data.
+After a GitHub update, Streamlit normally redeploys automatically. If the old
+version remains visible, open the app menu and select **Reboot app**.
 
-## 6. Tambahkan ke layar utama iPhone
+## 6. Set up account balances
 
-1. Buka URL Streamlit melalui **Safari**.
-2. Tekan tombol **Share**.
-3. Pilih **Add to Home Screen**.
-4. Beri nama `WonWise`, lalu tekan **Add**.
+1. Sign in to WonWise.
+2. Open **Manage balances and transfer money**.
+3. Use **Add account** to create accounts such as `Jeonbuk Bank` and
+   `Kakao Pay`.
+4. Enter the amount currently available in each real account.
+5. Use **Add money** for income such as salary or an external cash top-up.
+6. Use **Correct balance** when WonWise does not match the real banking app.
+7. Use **Transfer** to move money between accounts. Transfers are not counted
+   as spending.
 
-Ikon WonWise akan muncul di Home Screen. Aplikasi tetap membutuhkan koneksi internet.
+When adding a new expense, select an account under **Pay from**. The expense
+will automatically reduce that account's balance.
 
-## Catatan keamanan
+## 7. Import historical expenses from Excel
 
-- Jangan commit `.streamlit/secrets.toml`.
-- Jangan memakai Supabase secret key atau `service_role` key.
-- Gunakan password yang kuat.
-- Untuk menambahkan pengguna baru, buat akunnya dari Supabase Authentication.
+1. Open **Import expenses from Excel** inside WonWise.
+2. Upload an `.xlsx` workbook containing these columns:
+   `Expense details`, `Category`, `Cost`, `Transaction date`, and `Paid by`.
+3. Review the category and payment-account mappings.
+4. Review the preview and click **Import expenses**.
+
+WonWise combines compatible monthly sheets, ignores summary sheets and total
+rows, and skips expenses that already exist.
+
+Imported expenses are treated as historical records. They appear in monthly
+and yearly spending totals according to their dates, but they do not reduce the
+current account balances. Enter each account's real current balance separately.
+
+## 8. Add WonWise to an iPhone Home Screen
+
+1. Open the deployed Streamlit URL in Safari.
+2. Tap **Share**.
+3. Select **Add to Home Screen**.
+4. Enter the name `WonWise` and tap **Add**.
+
+An internet connection is required to use the application.
+
+## Security notes
+
+- Never commit `.streamlit/secrets.toml`.
+- Never use the Supabase secret key or `service_role` key in Streamlit.
+- Use a strong password.
+- Create new users from Supabase Authentication when access is required.

@@ -23,7 +23,7 @@ CATEGORIES = [
 ]
 
 BANKS = [
-    "KakaoBank",
+    "Kakao Pay",
     "Toss Bank",
     "KB Kookmin",
     "Shinhan Bank",
@@ -32,9 +32,34 @@ BANKS = [
     "NH NongHyup",
     "IBK Industrial Bank",
     "Jeonbuk Bank",
+    "Bank Jago",
+    "blu by BCA Digital",
     "Cash",
     "Other",
 ]
+
+IMPORT_CATEGORY_DEFAULTS = {
+    "Food & Groceries": "Food",
+    "Lifestyle & Others": "Other",
+    "Housing & Utilities": "Housing",
+    "Health & Personal": "Health",
+    "Transportation": "Transportation",
+}
+
+IMPORT_BANK_DEFAULTS = {
+    "Card JB Bank": "Jeonbuk Bank",
+    "Card Jago": "Bank Jago",
+    "Card Blu": "blu by BCA Digital",
+    "Cash": "Cash",
+}
+
+IMPORT_REQUIRED_COLUMNS = {
+    "expense details",
+    "category",
+    "cost",
+    "transaction date",
+    "paid by",
+}
 
 
 def load_supabase_settings():
@@ -140,9 +165,48 @@ def add_expense(client, user_id, expense_date, category, bank, amount, note):
     ).execute()
 
 
-def delete_expense(client, expense_id):
-    """Delete one expense. RLS prevents deleting another user's row."""
-    client.table("expenses").delete().eq("id", expense_id).execute()
+def add_tracked_expense(client, account_id, expense_date, category, amount, note):
+    """Insert an expense and debit its account atomically in Supabase."""
+    client.rpc(
+        "wonwise_add_expense",
+        {
+            "p_account_id": account_id,
+            "p_expense_date": expense_date.isoformat(),
+            "p_category": category,
+            "p_amount": int(amount),
+            "p_note": note.strip(),
+        },
+    ).execute()
+
+
+def import_expenses(client, user_id, expenses):
+    """Insert imported expenses in small batches."""
+    rows = []
+    for expense in expenses:
+        rows.append(
+            {
+                "user_id": user_id,
+                "expense_date": expense["expense_date"],
+                "category": expense["category"],
+                "bank": expense["bank"],
+                "amount": int(expense["amount"]),
+                "note": expense["note"],
+            }
+        )
+
+    for start in range(0, len(rows), 200):
+        client.table("expenses").insert(rows[start : start + 200]).execute()
+
+
+def delete_expense(client, expense_id, balance_features_ready=True):
+    """Delete an expense and refund it when it debited a tracked account."""
+    if balance_features_ready:
+        client.rpc(
+            "wonwise_delete_expense",
+            {"p_expense_id": expense_id},
+        ).execute()
+    else:
+        client.table("expenses").delete().eq("id", expense_id).execute()
 
 
 def load_expenses(client):
@@ -163,6 +227,252 @@ def load_expenses(client):
     return expenses
 
 
+def load_accounts(client):
+    """Load current balances for the signed-in user's accounts."""
+    response = (
+        client.table("accounts")
+        .select("id, name, balance")
+        .order("name")
+        .execute()
+    )
+    columns = ["id", "name", "balance"]
+    accounts = pd.DataFrame(response.data or [], columns=columns)
+    if not accounts.empty:
+        accounts["balance"] = pd.to_numeric(accounts["balance"]).astype("int64")
+    return accounts
+
+
+def create_account(client, name, opening_balance):
+    """Create a bank, wallet, or cash account with its current balance."""
+    client.rpc(
+        "wonwise_create_account",
+        {
+            "p_name": name.strip(),
+            "p_opening_balance": int(opening_balance),
+        },
+    ).execute()
+
+
+def add_money(client, account_id, amount, note):
+    """Add incoming money to one account."""
+    client.rpc(
+        "wonwise_add_money",
+        {
+            "p_account_id": account_id,
+            "p_amount": int(amount),
+            "p_note": note.strip(),
+        },
+    ).execute()
+
+
+def set_account_balance(client, account_id, new_balance, note):
+    """Correct an account so it matches the real balance."""
+    client.rpc(
+        "wonwise_set_balance",
+        {
+            "p_account_id": account_id,
+            "p_new_balance": int(new_balance),
+            "p_note": note.strip(),
+        },
+    ).execute()
+
+
+def transfer_funds(client, from_account_id, to_account_id, amount, note):
+    """Move money between two owned accounts without creating an expense."""
+    client.rpc(
+        "wonwise_transfer_funds",
+        {
+            "p_from_account_id": from_account_id,
+            "p_to_account_id": to_account_id,
+            "p_amount": int(amount),
+            "p_note": note.strip(),
+        },
+    ).execute()
+
+
+def set_flash(message, kind="success"):
+    """Keep a short message visible after Streamlit reruns."""
+    st.session_state.wonwise_flash = {"message": message, "kind": kind}
+
+
+def show_flash():
+    """Display and clear the latest action message."""
+    flash = st.session_state.pop("wonwise_flash", None)
+    if not flash:
+        return
+    if flash["kind"] == "warning":
+        st.warning(flash["message"])
+    elif flash["kind"] == "error":
+        st.error(flash["message"])
+    else:
+        st.success(flash["message"])
+
+
+def normalize_column_name(column):
+    """Normalize spreadsheet headers so capitalization does not matter."""
+    return " ".join(str(column).strip().lower().split())
+
+
+def parse_import_date(value):
+    """Read Excel date cells, Excel serial dates, or written dates."""
+    if pd.isna(value):
+        return pd.NaT
+    if isinstance(value, (int, float)):
+        return pd.Timestamp("1899-12-30") + pd.to_timedelta(value, unit="D")
+    return pd.to_datetime(value, errors="coerce")
+
+
+def parse_import_amount(value):
+    """Turn values such as ₩14,060 into the integer 14060."""
+    if pd.isna(value):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value)
+
+    written_value = str(value).strip()
+    is_negative = written_value.startswith("-") or (
+        written_value.startswith("(") and written_value.endswith(")")
+    )
+    cleaned = "".join(character for character in written_value if character.isdigit())
+    if not cleaned:
+        return None
+    amount = int(cleaned)
+    return -amount if is_negative else amount
+
+
+def read_expense_workbook(uploaded_file):
+    """Combine all monthly sheets that use the user's expense format."""
+    uploaded_file.seek(0)
+    workbook_sheets = pd.read_excel(uploaded_file, sheet_name=None)
+    imported_frames = []
+    invalid_frames = []
+    used_sheets = []
+    ignored_sheets = []
+
+    for sheet_name, source in workbook_sheets.items():
+        normalized_columns = {
+            normalize_column_name(column): column for column in source.columns
+        }
+        if not IMPORT_REQUIRED_COLUMNS.issubset(normalized_columns):
+            ignored_sheets.append(sheet_name)
+            continue
+
+        used_sheets.append(sheet_name)
+        frame = pd.DataFrame(
+            {
+                "details": source[normalized_columns["expense details"]],
+                "source_category": source[normalized_columns["category"]],
+                "amount": source[normalized_columns["cost"]],
+                "expense_date": source[normalized_columns["transaction date"]],
+                "source_bank": source[normalized_columns["paid by"]],
+                "extra_note": (
+                    source[normalized_columns["notes"]]
+                    if "notes" in normalized_columns
+                    else ""
+                ),
+            }
+        )
+
+        frame = frame[frame["details"].notna()].copy()
+        frame["details"] = frame["details"].astype(str).str.strip()
+        frame = frame[frame["details"] != ""]
+        frame["source_category"] = frame["source_category"].fillna("").astype(str).str.strip()
+        frame["source_bank"] = frame["source_bank"].fillna("").astype(str).str.strip()
+        frame["extra_note"] = frame["extra_note"].fillna("").astype(str).str.strip()
+        frame["amount"] = frame["amount"].map(parse_import_amount)
+        frame["expense_date"] = frame["expense_date"].map(parse_import_date)
+        frame["source_sheet"] = sheet_name
+
+        invalid = frame[
+            frame["expense_date"].isna()
+            | frame["amount"].isna()
+            | (frame["amount"] <= 0)
+            | (frame["source_category"] == "")
+            | (frame["source_bank"] == "")
+        ].copy()
+        valid = frame.drop(index=invalid.index).copy()
+
+        if not valid.empty:
+            imported_frames.append(valid)
+        if not invalid.empty:
+            invalid_frames.append(invalid)
+
+    columns = [
+        "details",
+        "source_category",
+        "amount",
+        "expense_date",
+        "source_bank",
+        "extra_note",
+        "source_sheet",
+    ]
+    imported = (
+        pd.concat(imported_frames, ignore_index=True)
+        if imported_frames
+        else pd.DataFrame(columns=columns)
+    )
+    invalid = (
+        pd.concat(invalid_frames, ignore_index=True)
+        if invalid_frames
+        else pd.DataFrame(columns=columns)
+    )
+    return imported, invalid, used_sheets, ignored_sheets
+
+
+def expense_import_key(expense_date, category, bank, amount, note):
+    """Create a stable key used only to avoid duplicate imports."""
+    normalized_date = pd.Timestamp(expense_date).date().isoformat()
+    normalized_note = "" if pd.isna(note) else str(note).strip().lower()
+    return (
+        normalized_date,
+        str(category).strip().lower(),
+        str(bank).strip().lower(),
+        int(amount),
+        normalized_note,
+    )
+
+
+def prepare_import_rows(imported, category_mapping, bank_mapping, existing_expenses):
+    """Apply mappings and remove rows already saved in Supabase."""
+    existing_keys = set()
+    for _, expense in existing_expenses.iterrows():
+        existing_keys.add(
+            expense_import_key(
+                expense["expense_date"],
+                expense["category"],
+                expense["bank"],
+                expense["amount"],
+                expense["note"],
+            )
+        )
+
+    prepared_rows = []
+    duplicate_count = 0
+    seen_upload_keys = set()
+
+    for _, expense in imported.iterrows():
+        note = expense["details"]
+        if expense["extra_note"]:
+            note = f"{note} | {expense['extra_note']}"
+
+        prepared = {
+            "expense_date": expense["expense_date"].date().isoformat(),
+            "category": category_mapping[expense["source_category"]],
+            "bank": bank_mapping[expense["source_bank"]],
+            "amount": int(expense["amount"]),
+            "note": note,
+        }
+        key = expense_import_key(**prepared)
+        if key in existing_keys or key in seen_upload_keys:
+            duplicate_count += 1
+            continue
+
+        seen_upload_keys.add(key)
+        prepared_rows.append(prepared)
+
+    return prepared_rows, duplicate_count
+
+
 def format_krw(amount):
     """Display an integer amount as Korean won."""
     return f"₩{int(amount):,}"
@@ -172,6 +482,322 @@ def month_label(month_key):
     """Convert YYYY-MM into a friendly label."""
     year, month = map(int, month_key.split("-"))
     return f"{calendar.month_name[month]} {year}"
+
+
+def render_account_manager(client, accounts):
+    """Show balances and simple forms for account money movements."""
+    st.subheader("Account balances")
+
+    if accounts.empty:
+        st.info(
+            "No balance account yet. Create Jeonbuk Bank, Kakao Pay, cash, or "
+            "another account below and enter its current balance."
+        )
+    else:
+        balance_table = accounts[["name", "balance"]].copy()
+        balance_table["balance"] = balance_table["balance"].map(format_krw)
+        balance_table = balance_table.rename(
+            columns={"name": "Bank / Account", "balance": "Current balance"}
+        )
+        st.dataframe(balance_table, hide_index=True, width="stretch")
+
+    with st.expander("Manage balances and transfer money", expanded=accounts.empty):
+        create_tab, add_tab, correct_tab, transfer_tab = st.tabs(
+            ["Add account", "Add money", "Correct balance", "Transfer"]
+        )
+
+        with create_tab:
+            st.caption(
+                "Enter the amount currently available in this bank, wallet, or cash."
+            )
+            with st.form("create_account_form", clear_on_submit=True):
+                account_name = st.text_input(
+                    "Account name",
+                    placeholder="Example: Jeonbuk Bank or Kakao Pay",
+                )
+                opening_balance = st.number_input(
+                    "Current balance (₩)",
+                    min_value=0,
+                    value=0,
+                    step=1_000,
+                )
+                create_clicked = st.form_submit_button(
+                    "Create account", width="stretch"
+                )
+
+            if create_clicked:
+                if not account_name.strip():
+                    st.warning("Please enter an account name.")
+                else:
+                    try:
+                        create_account(client, account_name, opening_balance)
+                    except Exception as error:
+                        st.error(f"Could not create the account: {error}")
+                    else:
+                        set_flash(f"Created {account_name.strip()}.")
+                        st.rerun()
+
+        with add_tab:
+            if accounts.empty:
+                st.info("Create an account first.")
+            else:
+                account_ids = accounts["id"].tolist()
+                account_names = accounts.set_index("id")["name"].to_dict()
+                with st.form("add_money_form", clear_on_submit=True):
+                    deposit_account = st.selectbox(
+                        "Add money to",
+                        account_ids,
+                        format_func=lambda account_id: account_names[account_id],
+                    )
+                    deposit_amount = st.number_input(
+                        "Amount received (₩)",
+                        min_value=100,
+                        value=10_000,
+                        step=1_000,
+                    )
+                    deposit_note = st.text_input(
+                        "Source / note (optional)",
+                        placeholder="Example: salary or cash top-up",
+                    )
+                    deposit_clicked = st.form_submit_button(
+                        "Add money", width="stretch"
+                    )
+
+                if deposit_clicked:
+                    try:
+                        add_money(
+                            client,
+                            deposit_account,
+                            deposit_amount,
+                            deposit_note,
+                        )
+                    except Exception as error:
+                        st.error(f"Could not add the money: {error}")
+                    else:
+                        set_flash(
+                            f"Added {format_krw(deposit_amount)} to "
+                            f"{account_names[deposit_account]}."
+                        )
+                        st.rerun()
+
+        with correct_tab:
+            if accounts.empty:
+                st.info("Create an account first.")
+            else:
+                account_ids = accounts["id"].tolist()
+                account_names = accounts.set_index("id")["name"].to_dict()
+                with st.form("correct_balance_form", clear_on_submit=True):
+                    corrected_account = st.selectbox(
+                        "Account to correct",
+                        account_ids,
+                        format_func=lambda account_id: account_names[account_id],
+                    )
+                    corrected_balance = st.number_input(
+                        "Actual balance now (₩)",
+                        min_value=0,
+                        value=0,
+                        step=1_000,
+                        help="Use the balance shown in your real banking app.",
+                    )
+                    correction_note = st.text_input(
+                        "Reason (optional)",
+                        placeholder="Example: starting balance correction",
+                    )
+                    correct_clicked = st.form_submit_button(
+                        "Update balance", width="stretch"
+                    )
+
+                if correct_clicked:
+                    try:
+                        set_account_balance(
+                            client,
+                            corrected_account,
+                            corrected_balance,
+                            correction_note,
+                        )
+                    except Exception as error:
+                        st.error(f"Could not update the balance: {error}")
+                    else:
+                        set_flash(
+                            f"{account_names[corrected_account]} is now "
+                            f"{format_krw(corrected_balance)}."
+                        )
+                        st.rerun()
+
+        with transfer_tab:
+            if len(accounts) < 2:
+                st.info("Create at least two accounts to make a transfer.")
+            else:
+                account_ids = accounts["id"].tolist()
+                account_names = accounts.set_index("id")["name"].to_dict()
+                account_balances = accounts.set_index("id")["balance"].to_dict()
+
+                def transfer_account_label(account_id):
+                    return (
+                        f"{account_names[account_id]} · "
+                        f"{format_krw(account_balances[account_id])}"
+                    )
+
+                with st.form("transfer_form", clear_on_submit=True):
+                    from_account = st.selectbox(
+                        "From",
+                        account_ids,
+                        format_func=transfer_account_label,
+                    )
+                    to_account = st.selectbox(
+                        "To",
+                        account_ids,
+                        index=1,
+                        format_func=transfer_account_label,
+                    )
+                    transfer_amount = st.number_input(
+                        "Transfer amount (₩)",
+                        min_value=100,
+                        value=10_000,
+                        step=1_000,
+                    )
+                    transfer_note = st.text_input(
+                        "Note (optional)",
+                        placeholder="Example: Kakao Pay top-up",
+                    )
+                    transfer_clicked = st.form_submit_button(
+                        "Transfer money", width="stretch"
+                    )
+
+                if transfer_clicked:
+                    if from_account == to_account:
+                        st.warning("Choose two different accounts.")
+                    else:
+                        try:
+                            transfer_funds(
+                                client,
+                                from_account,
+                                to_account,
+                                transfer_amount,
+                                transfer_note,
+                            )
+                        except Exception as error:
+                            st.error(f"Could not transfer the money: {error}")
+                        else:
+                            set_flash(
+                                f"Transferred {format_krw(transfer_amount)} from "
+                                f"{account_names[from_account]} to "
+                                f"{account_names[to_account]}."
+                            )
+                            st.rerun()
+
+
+def render_excel_importer(client, user_id, existing_expenses):
+    """Show an importer tailored to the user's multi-sheet expense workbook."""
+    with st.expander("Import expenses from Excel"):
+        st.write(
+            "Upload your existing .xlsx file. Monthly sheets are combined, while "
+            "summary sheets and total rows are ignored automatically."
+        )
+        uploaded_file = st.file_uploader(
+            "Expense spreadsheet",
+            type=["xlsx"],
+            key="expense_workbook",
+        )
+        if uploaded_file is None:
+            return
+
+        try:
+            imported, invalid, used_sheets, ignored_sheets = read_expense_workbook(
+                uploaded_file
+            )
+        except Exception as error:
+            st.error(f"Could not read this Excel file: {error}")
+            return
+
+        if imported.empty:
+            st.warning("No valid expense rows were found in this workbook.")
+            return
+
+        st.success(
+            f"Found {len(imported):,} valid expenses across "
+            f"{len(used_sheets)} monthly sheets."
+        )
+        if ignored_sheets:
+            st.caption(
+                "Ignored summary sheets: " + ", ".join(ignored_sheets)
+            )
+        if not invalid.empty:
+            row_word = "row" if len(invalid) == 1 else "rows"
+            st.warning(
+                f"{len(invalid)} {row_word} will be skipped because its date, amount, "
+                "category, or payment account is invalid."
+            )
+
+        st.markdown("#### Match spreadsheet categories")
+        category_mapping = {}
+        category_columns = st.columns(2)
+        for index, source_category in enumerate(
+            sorted(imported["source_category"].unique())
+        ):
+            default_category = IMPORT_CATEGORY_DEFAULTS.get(source_category, "Other")
+            with category_columns[index % 2]:
+                category_mapping[source_category] = st.selectbox(
+                    source_category,
+                    CATEGORIES,
+                    index=CATEGORIES.index(default_category),
+                    key=f"import_category_{source_category}",
+                )
+
+        st.markdown("#### Match payment accounts")
+        bank_mapping = {}
+        bank_columns = st.columns(2)
+        for index, source_bank in enumerate(sorted(imported["source_bank"].unique())):
+            default_bank = IMPORT_BANK_DEFAULTS.get(source_bank, "Other")
+            with bank_columns[index % 2]:
+                bank_mapping[source_bank] = st.selectbox(
+                    source_bank,
+                    BANKS,
+                    index=BANKS.index(default_bank),
+                    key=f"import_bank_{source_bank}",
+                )
+
+        rows_to_import, duplicate_count = prepare_import_rows(
+            imported,
+            category_mapping,
+            bank_mapping,
+            existing_expenses,
+        )
+
+        preview = pd.DataFrame(rows_to_import)
+        total_amount = sum(row["amount"] for row in rows_to_import)
+        metric_1, metric_2, metric_3 = st.columns(3)
+        metric_1.metric("Ready to import", f"{len(rows_to_import):,}")
+        metric_2.metric("Total", format_krw(total_amount))
+        metric_3.metric("Duplicates skipped", f"{duplicate_count:,}")
+
+        if not preview.empty:
+            preview["amount"] = preview["amount"].map(format_krw)
+            preview = preview.rename(
+                columns={
+                    "expense_date": "Date",
+                    "category": "Category",
+                    "bank": "Bank / Account",
+                    "amount": "Amount",
+                    "note": "Used for / Note",
+                }
+            )
+            st.dataframe(preview.head(30), hide_index=True, width="stretch")
+            st.caption("Preview shows the first 30 rows.")
+
+        import_clicked = st.button(
+            f"Import {len(rows_to_import):,} expenses",
+            type="primary",
+            disabled=not rows_to_import,
+        )
+        if import_clicked:
+            try:
+                import_expenses(client, user_id, rows_to_import)
+            except Exception as error:
+                st.error(f"Import failed: {error}")
+            else:
+                st.success(f"Imported {len(rows_to_import):,} expenses.")
+                st.rerun()
 
 
 def draw_category_charts(category_summary):
@@ -229,6 +855,13 @@ if "current_user" not in st.session_state:
 
 current_user = st.session_state.current_user
 
+try:
+    accounts = load_accounts(supabase)
+    balance_features_ready = True
+except Exception:
+    accounts = pd.DataFrame(columns=["id", "name", "balance"])
+    balance_features_ready = False
+
 with st.sidebar:
     st.write(f"Signed in as **{current_user['email']}**")
     if st.button("Sign out", width="stretch"):
@@ -241,11 +874,47 @@ with st.sidebar:
     with st.form("expense_form", clear_on_submit=True):
         expense_date = st.date_input("Date", value=date.today())
         category = st.selectbox("Category", CATEGORIES)
-        selected_bank = st.selectbox("Bank / payment account", BANKS)
-        custom_bank = st.text_input(
-            "Other bank name (only if you selected Other)",
-            placeholder="Example: another bank",
-        )
+
+        tracked_account_id = None
+        if not accounts.empty:
+            account_names = accounts.set_index("id")["name"].to_dict()
+            account_balances = accounts.set_index("id")["balance"].to_dict()
+            untracked_option = "__wonwise_untracked__"
+            payment_options = accounts["id"].tolist() + [untracked_option]
+
+            def payment_option_label(option):
+                if option == untracked_option:
+                    return "Other payment method (do not change a balance)"
+                return (
+                    f"{account_names[option]} · "
+                    f"{format_krw(account_balances[option])}"
+                )
+
+            selected_payment = st.selectbox(
+                "Pay from",
+                payment_options,
+                format_func=payment_option_label,
+            )
+            if selected_payment == untracked_option:
+                selected_bank = st.selectbox(
+                    "Bank / payment account",
+                    BANKS,
+                )
+                custom_bank = st.text_input(
+                    "Other bank name (only if you selected Other)",
+                    placeholder="Example: another bank",
+                )
+            else:
+                tracked_account_id = selected_payment
+                selected_bank = account_names[selected_payment]
+                custom_bank = ""
+        else:
+            selected_bank = st.selectbox("Bank / payment account", BANKS)
+            custom_bank = st.text_input(
+                "Other bank name (only if you selected Other)",
+                placeholder="Example: another bank",
+            )
+
         amount = st.number_input(
             "Amount (₩)",
             min_value=100,
@@ -253,7 +922,10 @@ with st.sidebar:
             step=1_000,
             help="Enter a whole number, for example 12500.",
         )
-        note = st.text_input("Note (optional)", placeholder="Example: lunch")
+        note = st.text_input(
+            "Used for / note (optional)",
+            placeholder="Example: lunch at the cafeteria",
+        )
         submitted = st.form_submit_button("Save expense", width="stretch")
 
     if submitted:
@@ -262,21 +934,40 @@ with st.sidebar:
             st.error("Please enter the bank name.")
         else:
             try:
-                add_expense(
-                    supabase,
-                    current_user["id"],
-                    expense_date,
-                    category,
-                    bank,
-                    amount,
-                    note,
-                )
-                st.success(f"Saved {format_krw(amount)} for {category}.")
-            except Exception:
-                st.error("Could not save the expense. Please try again.")
+                if tracked_account_id:
+                    add_tracked_expense(
+                        supabase,
+                        tracked_account_id,
+                        expense_date,
+                        category,
+                        amount,
+                        note,
+                    )
+                else:
+                    add_expense(
+                        supabase,
+                        current_user["id"],
+                        expense_date,
+                        category,
+                        bank,
+                        amount,
+                        note,
+                    )
+            except Exception as error:
+                st.error(f"Could not save the expense: {error}")
+            else:
+                set_flash(f"Saved {format_krw(amount)} for {category}.")
+                st.rerun()
 
 st.title("💸 WonWise")
 st.caption("Your private expense tracker in Korean won · synced with Supabase")
+show_flash()
+
+if not balance_features_ready:
+    st.warning(
+        "Balance and transfer features are not active yet. Run the updated "
+        "supabase_schema.sql in Supabase SQL Editor, then refresh this app."
+    )
 
 try:
     expenses = load_expenses(supabase)
@@ -286,6 +977,39 @@ except Exception:
         "Security policies, and Streamlit secrets."
     )
     st.stop()
+
+today = date.today()
+if expenses.empty:
+    spending_this_month = 0
+    spending_this_year = 0
+else:
+    spending_this_month = int(
+        expenses.loc[
+            (expenses["expense_date"].dt.year == today.year)
+            & (expenses["expense_date"].dt.month == today.month),
+            "amount",
+        ].sum()
+    )
+    spending_this_year = int(
+        expenses.loc[
+            expenses["expense_date"].dt.year == today.year,
+            "amount",
+        ].sum()
+    )
+
+total_balance = int(accounts["balance"].sum()) if not accounts.empty else 0
+overview_1, overview_2, overview_3 = st.columns(3)
+overview_1.metric("Spending this month", format_krw(spending_this_month))
+overview_2.metric("Spending this year", format_krw(spending_this_year))
+overview_3.metric(
+    "Total available balance",
+    format_krw(total_balance) if balance_features_ready else "—",
+)
+
+if balance_features_ready:
+    render_account_manager(supabase, accounts)
+
+render_excel_importer(supabase, current_user["id"], expenses)
 
 current_month = date.today().strftime("%Y-%m")
 if expenses.empty:
@@ -348,7 +1072,7 @@ else:
             "category": "Category",
             "bank": "Bank / Account",
             "amount": "Amount",
-            "note": "Note",
+            "note": "Used for / Note",
         }
     )
     st.dataframe(display_table, hide_index=True, width="stretch")
@@ -367,10 +1091,19 @@ else:
         )
         if st.button("Delete selected expense", type="secondary"):
             try:
-                delete_expense(supabase, expense_to_delete)
+                delete_expense(
+                    supabase,
+                    expense_to_delete,
+                    balance_features_ready,
+                )
+            except Exception as error:
+                st.error(f"Could not delete the expense: {error}")
+            else:
+                set_flash(
+                    "Expense deleted. If it used a tracked account, its balance "
+                    "was restored."
+                )
                 st.rerun()
-            except Exception:
-                st.error("Could not delete the expense. Please try again.")
 
 st.divider()
 st.caption("Your data is stored securely in your Supabase account.")
